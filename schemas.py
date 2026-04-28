@@ -7,8 +7,8 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class OrderItemIn(BaseModel):
-    product: str = Field(..., min_length=1, max_length=255, description="İlaç adı")
-    quantity: int = Field(..., gt=0, description="Sipariş miktarı (kutu/adet)")
+    product: str = Field(..., min_length=1, max_length=255, description="Ilac adi")
+    quantity: int = Field(..., gt=0, description="Siparis miktari (kutu/adet)")
 
     @field_validator("product")
     @classmethod
@@ -19,15 +19,13 @@ class OrderItemIn(BaseModel):
 class OrderWebhookIn(BaseModel):
     """ElevenLabs agent webhook tool'undan gelen payload."""
 
-    batch_id: str = Field(..., min_length=1, description="ElevenLabs batch_id")
     conversation_id: str = Field(..., min_length=1, description="ElevenLabs conversation_id")
-    recipient_number: str = Field(..., min_length=3, description="Aranan eczane numarası")
-    items: list[OrderItemIn] = Field(..., min_length=1, description="Sipariş edilen ürünler")
+    recipient_number: str = Field(..., min_length=3, description="Aranan eczane numarasi")
+    items: list[OrderItemIn] = Field(..., min_length=1, description="Siparis edilen urunler")
 
 
 class OrderOut(BaseModel):
     order_id: int
-    batch_id: str
     conversation_id: str
     recipient_number: str
     item_count: int

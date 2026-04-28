@@ -1,4 +1,4 @@
-"""FastAPI server — ElevenLabs sipariş webhook'u."""
+"""FastAPI server — ElevenLabs siparis webhook'u."""
 from __future__ import annotations
 
 import logging
@@ -8,8 +8,8 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database import SessionLocal, engine, get_session
-from models import Batch, Order, OrderItem
+from database import engine, get_session
+from models import Order, OrderItem
 from schemas import HealthOut, OrderOut, OrderWebhookIn
 
 logging.basicConfig(
@@ -21,8 +21,6 @@ logger = logging.getLogger("order-webhook")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # init.sql Postgres container ilk açılışta çalıştırır,
-    # burada sadece bağlantıyı sınıyoruz
     async with engine.begin() as conn:
         await conn.execute(text("SELECT 1"))
     logger.info("DB connection OK")
@@ -31,8 +29,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Eczane Sipariş Webhook",
-    version="1.0.0",
+    title="Eczane Siparis Webhook",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -56,30 +54,29 @@ async def receive_order(
     payload: OrderWebhookIn,
     session: AsyncSession = Depends(get_session),
 ) -> OrderOut:
-    """ElevenLabs agent tool'undan gelen siparişi kaydeder.
+    """ElevenLabs agent tool'undan gelen siparisi kaydeder.
 
-    Idempotent: aynı conversation_id ile gelen istek tekrar yazmaz,
-    mevcut kaydı döner.
+    Idempotent: ayni conversation_id ile gelen istek tekrar yazmaz,
+    mevcut kaydi doner. Batch_id agent'tan gelmez; raporlama UI tarafinda
+    ElevenLabs API ile conversation_id eslemesi yaparak yapilir.
     """
     logger.info(
-        "Incoming order: batch=%s conv=%s to=%s items=%d",
-        payload.batch_id,
+        "Incoming order: conv=%s to=%s items=%d",
         payload.conversation_id,
         payload.recipient_number,
         len(payload.items),
     )
 
-    # 1) Conversation_id daha önce gelmiş mi? (idempotency)
+    # Idempotency check
     existing = await session.execute(
         select(Order).where(Order.conversation_id == payload.conversation_id)
     )
     existing_order = existing.scalar_one_or_none()
     if existing_order is not None:
         logger.info("Duplicate conversation_id=%s, returning existing", payload.conversation_id)
-        await session.refresh(existing_order, attribute_names=["batch", "items"])
+        await session.refresh(existing_order, attribute_names=["items"])
         return OrderOut(
             order_id=existing_order.id,
-            batch_id=existing_order.batch.batch_id,
             conversation_id=existing_order.conversation_id,
             recipient_number=existing_order.recipient_number,
             item_count=len(existing_order.items),
@@ -87,20 +84,8 @@ async def receive_order(
             status="duplicate",
         )
 
-    # 2) Batch'i bul ya da oluştur
-    result = await session.execute(
-        select(Batch).where(Batch.batch_id == payload.batch_id)
-    )
-    batch = result.scalar_one_or_none()
-    if batch is None:
-        batch = Batch(batch_id=payload.batch_id)
-        session.add(batch)
-        await session.flush()  # batch.id'yi al
-        logger.info("Created new batch pk=%s batch_id=%s", batch.id, batch.batch_id)
-
-    # 3) Order ve item'ları yaz
+    # Yeni siparis yaz
     order = Order(
-        batch_pk=batch.id,
         conversation_id=payload.conversation_id,
         recipient_number=payload.recipient_number,
         raw_payload=payload.model_dump(),
@@ -122,7 +107,6 @@ async def receive_order(
 
     return OrderOut(
         order_id=order.id,
-        batch_id=batch.batch_id,
         conversation_id=order.conversation_id,
         recipient_number=order.recipient_number,
         item_count=len(payload.items),

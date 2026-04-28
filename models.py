@@ -1,4 +1,4 @@
-"""ORM models — batches, orders, order_items."""
+"""ORM models — orders, order_items. Batch yonetimi UI + ElevenLabs tarafinda."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -12,26 +12,10 @@ from sqlalchemy.sql import func
 from database import Base
 
 
-class Batch(Base):
-    __tablename__ = "batches"
-
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    batch_id: Mapped[str] = mapped_column(Text, unique=True, nullable=False, index=True)
-    name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
-    )
-
-    orders: Mapped[list["Order"]] = relationship(back_populates="batch")
-
-
 class Order(Base):
     __tablename__ = "orders"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    batch_pk: Mapped[int] = mapped_column(
-        BigInteger, ForeignKey("batches.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
     conversation_id: Mapped[str] = mapped_column(
         Text, unique=True, nullable=False, index=True
     )
@@ -41,7 +25,6 @@ class Order(Base):
         TIMESTAMP(timezone=True), server_default=func.now(), nullable=False
     )
 
-    batch: Mapped["Batch"] = relationship(back_populates="orders")
     items: Mapped[list["OrderItem"]] = relationship(
         back_populates="order", cascade="all, delete-orphan"
     )
