@@ -1,0 +1,42 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-orders}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-orders}
+      POSTGRES_DB: ${POSTGRES_DB:-orders}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-orders} -d ${POSTGRES_DB:-orders}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  app:
+    build: ./app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-orders}:${POSTGRES_PASSWORD:-orders}@db:5432/${POSTGRES_DB:-orders}
+    # Traefik host network mode'da → container'i host loopback'ine bind et
+    ports:
+      - "127.0.0.1:8000:8000"
+    labels:
+      - "traefik.enable=true"
+      # Router
+      - "traefik.http.routers.order-webhook.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.order-webhook.entrypoints=websecure"
+      - "traefik.http.routers.order-webhook.tls=true"
+      - "traefik.http.routers.order-webhook.tls.certresolver=letsencrypt"
+      # Service — Traefik host modunda, 127.0.0.1 üzerinden ulasir
+      - "traefik.http.services.order-webhook.loadbalancer.server.url=http://127.0.0.1:8000"
+
+volumes:
+  pgdata:
