@@ -4,9 +4,12 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
+from fastapi import Request
 from fastapi import Depends, FastAPI, HTTPException, status
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from database import engine, get_session
 from models import Order, OrderItem
@@ -33,6 +36,19 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan,
 )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    body = await request.body()
+    logger.error(
+        "422 validation error\n  errors=%s\n  body=%s",
+        exc.errors(),
+        body.decode("utf-8", errors="replace"),
+    )
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors(), "received_body": body.decode("utf-8", errors="replace")},
+    )
 
 
 @app.get("/health", response_model=HealthOut)
