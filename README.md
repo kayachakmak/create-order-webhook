@@ -8,19 +8,19 @@ ElevenLabs voice agent'ından gelen siparişleri PostgreSQL'e yazan FastAPI webh
 ElevenLabs Agent (Webhook Tool)
         │  HTTPS POST
         ▼
-[Traefik]  ── SSL termination + routing (label-based)
-        │  HTTP :8000 (internal docker network)
+[Traefik]  ── SSL termination + routing (label-based, host network)
+        │  HTTP 127.0.0.1:8000 (loopback)
         ▼
 [FastAPI app]  ──►  [PostgreSQL 16]
 ```
 
 ## Veri Modeli
 
-- **batches** — ElevenLabs batch call kampanyaları (`batch_id` unique)
-- **orders** — her konuşma bir sipariş (`conversation_id` unique, `recipient_number`, `raw_payload` JSONB olarak)
-- **order_items** — siparişteki ilaç + miktar satırları
+- **orders** — her ElevenLabs konuşması bir sipariş satırı. `conversation_id` UNIQUE, idempotency anahtarı. `recipient_number` + `raw_payload` (JSONB, debug için ham webhook gövdesi).
+- **order_items** — sipariş satırları (ilaç adı + miktar). `order_id → orders.id ON DELETE CASCADE`, `quantity > 0`.
+- **v_orders_full** — raporlama için flatten view (orders × order_items).
 
-Foreign key zinciri: `order_items.order_id → orders.id → batches.id`
+Batch yönetimi bu DB'de değil; UI ElevenLabs API'den `conversation_id` listesi alıp `POST /orders/by-conversations` ile join ediyor.
 
 ## Kurulum (VPS)
 
@@ -50,11 +50,14 @@ docker compose logs -f app
 
 | Değişken | Örnek | Açıklama |
 |----------|-------|----------|
+| `POSTGRES_USER` | `orders` | DB kullanıcı adı |
 | `POSTGRES_PASSWORD` | `s3cret...` | DB parolası — mutlaka değiştir |
+| `POSTGRES_DB` | `orders` | DB adı |
 | `DOMAIN` | `webhook.example.com` | Webhook'un yayınlanacağı domain |
-| `TRAEFIK_NETWORK` | `traefik` | Traefik'in bağlı olduğu external network'ün Docker adı |
+| `TRAEFIK_NETWORK` | `traefik` | Traefik'in bağlı olduğu external network adı (mevcut compose host-loopback kullandığı için referans olarak duruyor; networks bloğu eklersen kullanılır). |
 | `TRAEFIK_ENTRYPOINT` | `websecure` | Traefik HTTPS entrypoint adı |
 | `TRAEFIK_CERTRESOLVER` | `letsencrypt` | Traefik cert resolver adı |
+| `WEBHOOK_API_TOKEN` | `(boş)` | Read endpoint'leri için bearer token. Boşsa auth kapalı; set edildiğinde `Authorization: Bearer <token>` zorunlu (sadece read endpoint'lerinde). |
 
 > Entrypoint ve certresolver isimleri Traefik static config'inde (genelde `traefik.yml`) tanımlıdır. Farklı isimlendirmişsen (`https`, `myresolver` vs.) buradan eşle.
 
@@ -64,13 +67,12 @@ Deploy'dan önce `<DOMAIN>` için A kaydı VPS IP'sine yönlendirilmiş olmalı,
 
 ## Webhook Endpoint
 
-### `POST /webhook/order`
+### `POST /webhook/order` (auth yok)
 
 ElevenLabs agent tool'undan beklenen payload:
 
 ```json
 {
-  "batch_id": "batch_abc123",
   "conversation_id": "conv_xyz789",
   "recipient_number": "+905551234567",
   "items": [
@@ -81,9 +83,9 @@ ElevenLabs agent tool'undan beklenen payload:
 ```
 
 **Davranış:**
-- Batch yoksa otomatik oluşturulur.
 - Aynı `conversation_id` ile ikinci kez gelirse tekrar yazmaz, mevcut kaydı `status: "duplicate"` ile döner (idempotent).
 - Tüm payload `orders.raw_payload` JSONB kolonuna kaydedilir (debug için).
+- 422 dönüşlerinde gelen ham gövde response'a `received_body` olarak eklenir — agent payload'ları sürüm sürüm değişebildiği için kasıtlı.
 
 **Test:**
 
@@ -91,7 +93,6 @@ ElevenLabs agent tool'undan beklenen payload:
 curl -X POST https://webhook.your-domain.com/webhook/order \
   -H "Content-Type: application/json" \
   -d '{
-    "batch_id": "batch_test1",
     "conversation_id": "conv_test1",
     "recipient_number": "+905551234567",
     "items": [
@@ -99,6 +100,25 @@ curl -X POST https://webhook.your-domain.com/webhook/order \
       {"product": "Parol",   "quantity": 5}
     ]
   }'
+```
+
+### `POST /orders/by-conversations` (auth: `WEBHOOK_API_TOKEN` set ise zorunlu)
+
+Bir batch'in `conversation_id`'lerini DB'deki siparişlerle eşleştirmek için bulk lookup. UI tarafında ElevenLabs API'den alınan listeyi bu endpoint ile join ediyoruz.
+
+```json
+{ "conversation_ids": ["conv_abc", "conv_xyz", "conv_123"] }
+```
+
+- Liste boş olamaz, en fazla 600 id (aşılırsa 400).
+- DB'de bulunmayan id'ler response'tan sessizce düşer.
+- Siparişler `created_at DESC`, item'lar order içinde `id ASC` sırasında döner.
+
+```bash
+curl -X POST https://webhook.your-domain.com/orders/by-conversations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $WEBHOOK_API_TOKEN" \
+  -d '{"conversation_ids":["conv_test1","conv_missing"]}'
 ```
 
 ### `GET /health`
@@ -115,12 +135,11 @@ Agent'ta **Webhook Tool** (server tool) tanımla:
 - **URL:** `https://<DOMAIN>/webhook/order`
 - **Method:** `POST`
 - **Body parameters:**
-  - `batch_id` — `{{system__batch_call__batch_id}}` (veya batch dynamic variable)
   - `conversation_id` — `{{system__conversation_id}}`
   - `recipient_number` — `{{system__caller_id}}` ya da batch'teki recipient
-  - `items` — agent'ın topladığı sipariş listesi (array of object)
+  - `items` — agent'ın topladığı sipariş listesi (array of object: `{product, quantity}`)
 
-> ElevenLabs'taki sistem değişkeni isimleri zamanla değişebiliyor — agent UI'ındaki "Insert variable" listesinden doğrula.
+> ElevenLabs'taki sistem değişkeni isimleri zamanla değişebiliyor — agent UI'ındaki "Insert variable" listesinden doğrula. `batch_id` payload'a eklenmez; batch eşlemesi UI tarafında yapılıyor.
 
 ## Veri Sorgulama
 
@@ -128,12 +147,6 @@ Tüm siparişleri ürün satırlarıyla birlikte:
 
 ```sql
 SELECT * FROM v_orders_full;
-```
-
-Bir batch'in siparişleri:
-
-```sql
-SELECT * FROM v_orders_full WHERE batch_id = 'batch_abc123';
 ```
 
 Bir ürünün toplam sipariş miktarı:
@@ -153,9 +166,11 @@ docker compose exec db psql -U orders -d orders
 
 ## Sorun Giderme — Traefik
 
+Traefik host network mode'da çalıştığı varsayımıyla; app `127.0.0.1:8000` üzerine bind eder, Traefik label'daki `loadbalancer.server.url=http://127.0.0.1:8000` üzerinden ulaşır.
+
 **404 dönüyor:**
 - `docker compose logs app` → app çalışıyor mu?
-- `docker network inspect <TRAEFIK_NETWORK>` → app container listede var mı?
+- `curl -i http://127.0.0.1:8000/health` (VPS üzerinde) → app loopback'te erişilebilir mi?
 - Traefik dashboard'da router görünüyor mu? Rule doğru domain mi?
 
 **SSL sertifikası alınmadı:**
@@ -163,12 +178,9 @@ docker compose exec db psql -U orders -d orders
 - Traefik logs: `docker logs <traefik-container>` → ACME challenge hataları
 - Cert resolver adı `.env`'deki `TRAEFIK_CERTRESOLVER` ile Traefik static config'i eşleşiyor mu?
 
-**"network ... declared as external, but could not be found":**
-- `TRAEFIK_NETWORK` adı yanlış. `docker network ls` ile doğrula.
-
 ## Sonra Eklenecekler (şimdilik kapsam dışı)
 
-- Auth (HMAC signature veya bearer token) — şu an açık endpoint
+- Webhook endpoint için auth (HMAC signature veya bearer) — şu an `POST /webhook/order` açık. Read endpoint'lerinde `WEBHOOK_API_TOKEN` zaten var.
 - Rate limiting (Traefik middleware ile label üzerinden eklenebilir)
 - Backup cronjob (`pg_dump`)
 - Alembic migrations (schema değişirse)

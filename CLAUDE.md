@@ -35,8 +35,8 @@ There is no test suite, linter config, or migration tool in this repo. Schema ch
 Three-tier, all defined in `docker-compose.yml`:
 
 1. **Traefik** (external, not in this compose file) — terminates TLS and routes `https://${DOMAIN}` to the app via labels on the `app` service. Traefik is assumed to run in host network mode, so the app binds to `127.0.0.1:8000` on the host and Traefik reaches it through loopback (not via the docker network). The Traefik network name, entrypoint, and certresolver are all `.env`-driven.
-2. **`app`** — FastAPI + async SQLAlchemy + asyncpg. Source under `app/`. Single endpoint of substance: `POST /webhook/order`.
-3. **`db`** — Postgres 16. Schema bootstrapped from `db/init.sql` via the official image's `/docker-entrypoint-initdb.d` hook.
+2. **`app`** — FastAPI + async SQLAlchemy + asyncpg. Source under `app/`. Endpoints: `GET /health`, `POST /webhook/order` (write, ingestion), `POST /orders/by-conversations` (read, bulk lookup).
+3. **`db`** — Postgres 16. Schema bootstrapped from `db/init.sql` via the official image's `/docker-entrypoint-initdb.d` hook. Port `5432` is published to host loopback (`127.0.0.1:5432`) for direct psql access.
 
 ### Request flow (`app/main.py`)
 
@@ -66,9 +66,9 @@ There is no Alembic / migration tooling. The README explicitly calls this out as
 
 ### Configuration
 
-All config is env vars (loaded by Docker Compose from `.env`). `DATABASE_URL` defaults to the in-compose `db` hostname; the app has no fallback for running outside Docker. The `.env.example` / `env.example` files are the canonical list of required vars (`POSTGRES_PASSWORD`, `DOMAIN`, `TRAEFIK_NETWORK`, `TRAEFIK_ENTRYPOINT`, `TRAEFIK_CERTRESOLVER`, `WEBHOOK_API_TOKEN`).
+All config is env vars (loaded by Docker Compose from `.env`). `DATABASE_URL` is constructed by Compose from `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` and points at the in-compose `db` hostname; `app/database.py` has a hard-coded fallback (`orders:orders@db:5432/orders`) intended only for the in-Docker default — there is no fallback for running outside Docker. The `.env.example` / `env.example` files are the canonical list of required vars (`POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `DOMAIN`, `TRAEFIK_NETWORK`, `TRAEFIK_ENTRYPOINT`, `TRAEFIK_CERTRESOLVER`, `WEBHOOK_API_TOKEN`).
 
-`WEBHOOK_API_TOKEN` is read once at import time in `app/main.py` via `os.getenv`. Empty/unset = auth disabled (preserves the original open-endpoint behavior); set = read endpoints require `Authorization: Bearer <token>`. The dependency is `require_auth` and is meant to be reused on future read endpoints — attach it via `dependencies=[Depends(require_auth)]` on the route decorator.
+`WEBHOOK_API_TOKEN` is read once at import time in `app/main.py` via `os.getenv`. Empty/unset = auth disabled (preserves the original open-endpoint behavior); set = endpoints with `dependencies=[Depends(require_auth)]` require `Authorization: Bearer <token>`. Currently only `POST /orders/by-conversations` uses it; `POST /webhook/order` is intentionally unauthenticated (ElevenLabs tool call). Reuse `require_auth` on future read endpoints the same way.
 
 ## Read API
 
@@ -82,7 +82,7 @@ Request:
 { "conversation_ids": ["conv_abc", "conv_xyz", "conv_123"] }
 ```
 
-- `conversation_ids` must be non-empty and ≤ 600 (returns 400 otherwise — note: this is a manual check in the handler, *not* Pydantic, so it bypasses the verbose 422 echo handler).
+- `conversation_ids` must be non-empty and ≤ `MAX_CONVERSATION_IDS_PER_REQUEST` (600, defined at the top of `app/main.py`); returns 400 otherwise — note: this is a manual check in the handler, *not* Pydantic, so it bypasses the verbose 422 echo handler.
 - IDs not found in the DB are silently absent from the response (no nulls, no errors).
 - Items are inlined per order, sorted by `id` ascending (insertion order); orders are sorted by `created_at` descending.
 - Single SQL query with `selectinload(Order.items)` — do not refactor into per-order item lookups.
@@ -108,4 +108,4 @@ curl -X POST https://webhook.your-domain.com/orders/by-conversations \
 
 - Code comments and log messages are in Turkish (the product domain is Turkish pharmacies). Match that style when editing existing files; new code can be English unless it sits next to Turkish text.
 - Async everywhere on the app side: `AsyncSession`, `await session.execute(...)`, `async def` route handlers. Don't introduce sync SQLAlchemy calls.
-- The endpoint is currently unauthenticated by design (see README "Sonra Eklenecekler"). Don't add auth without being asked.
+- `POST /webhook/order` is intentionally unauthenticated (see README "Sonra Eklenecekler"); don't add auth to it without being asked. Read endpoints opt in via `dependencies=[Depends(require_auth)]`.
