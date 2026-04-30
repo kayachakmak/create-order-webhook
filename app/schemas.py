@@ -36,3 +36,29 @@ class OrderOut(BaseModel):
 class HealthOut(BaseModel):
     status: str
     db: str
+
+
+class OrdersByConversationsRequest(BaseModel):
+    """Birden fazla conversation_id icin siparis sorgusu."""
+
+    conversation_ids: list[str] = Field(
+        ...,
+        description="Aranacak ElevenLabs conversation_id listesi (1-600 arasi)",
+    )
+
+
+class OrderItemOut(BaseModel):
+    product_name: str
+    quantity: int
+
+
+class OrderDetailOut(BaseModel):
+    order_id: int
+    conversation_id: str
+    recipient_number: str
+    created_at: datetime
+    items: list[OrderItemOut]
+
+
+class OrdersByConversationsResponse(BaseModel):
+    orders: list[OrderDetailOut]

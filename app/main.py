@@ -2,18 +2,31 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
-from fastapi import Request
+from fastapi import Header, Request
 from fastapi import Depends, FastAPI, HTTPException, status
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from database import engine, get_session
 from models import Order, OrderItem
-from schemas import HealthOut, OrderOut, OrderWebhookIn
+from schemas import (
+    HealthOut,
+    OrderDetailOut,
+    OrderItemOut,
+    OrderOut,
+    OrderWebhookIn,
+    OrdersByConversationsRequest,
+    OrdersByConversationsResponse,
+)
+
+WEBHOOK_API_TOKEN = os.getenv("WEBHOOK_API_TOKEN", "").strip()
+MAX_CONVERSATION_IDS_PER_REQUEST = 600
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,6 +49,27 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan,
 )
+
+def require_auth(authorization: str | None = Header(default=None)) -> None:
+    """Optional bearer auth.
+
+    WEBHOOK_API_TOKEN bos ise kontrol yapilmaz (local/dev davranisi).
+    Set edildiyse Authorization: Bearer <token> zorunlu, yoksa 401.
+    """
+    if not WEBHOOK_API_TOKEN:
+        return
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="missing_or_invalid_authorization",
+        )
+    token = authorization[len("Bearer "):].strip()
+    if token != WEBHOOK_API_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid_token",
+        )
+
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -128,4 +162,55 @@ async def receive_order(
         item_count=len(payload.items),
         created_at=order.created_at,
         status="ok",
+    )
+
+
+@app.post(
+    "/orders/by-conversations",
+    response_model=OrdersByConversationsResponse,
+    dependencies=[Depends(require_auth)],
+)
+async def orders_by_conversations(
+    payload: OrdersByConversationsRequest,
+    session: AsyncSession = Depends(get_session),
+) -> OrdersByConversationsResponse:
+    """Verilen conversation_id listesi icin siparisleri items ile birlikte doner.
+
+    Bulunamayan id'ler sessizce response'tan dusurulur (null/error donmez).
+    """
+    ids = payload.conversation_ids
+    if len(ids) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="conversation_ids must be non-empty",
+        )
+    if len(ids) > MAX_CONVERSATION_IDS_PER_REQUEST:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"conversation_ids exceeds maximum of {MAX_CONVERSATION_IDS_PER_REQUEST}",
+        )
+
+    stmt = (
+        select(Order)
+        .where(Order.conversation_id.in_(ids))
+        .options(selectinload(Order.items))
+        .order_by(Order.created_at.desc())
+    )
+    result = await session.execute(stmt)
+    orders = result.scalars().all()
+
+    return OrdersByConversationsResponse(
+        orders=[
+            OrderDetailOut(
+                order_id=o.id,
+                conversation_id=o.conversation_id,
+                recipient_number=o.recipient_number,
+                created_at=o.created_at,
+                items=[
+                    OrderItemOut(product_name=i.product_name, quantity=i.quantity)
+                    for i in sorted(o.items, key=lambda i: i.id)
+                ],
+            )
+            for o in orders
+        ]
     )
